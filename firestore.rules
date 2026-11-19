@@ -1,0 +1,200 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidUserProfile(data, uid) {
+      return data.keys().hasAll(['uid', 'displayName', 'email', 'role', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'displayName', 'email', 'photoURL', 'role', 'createdAt', 'updatedAt'])
+        && data.uid == uid
+        && data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128
+        && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120
+        && data.email is string && data.email.size() >= 3 && data.email.size() <= 180
+        && (!('photoURL' in data) || (data.photoURL is string && data.photoURL.size() <= 500))
+        && data.role == 'client'
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidQuote(data) {
+      return data.keys().hasAll([
+          'id', 'ownerId', 'referenceCode', 'clientName', 'email',
+          'serviceIds', 'slaTier', 'estimatedBaseline', 'notes', 'status',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'ownerId', 'referenceCode', 'clientName', 'organization',
+          'email', 'phone', 'serviceIds', 'slaTier', 'estimatedBaseline',
+          'notes', 'status', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.id)
+        && data.ownerId == request.auth.uid
+        && data.referenceCode is string && data.referenceCode.matches('^ESK-[0-9]{4,8}$')
+        && data.clientName is string && data.clientName.size() >= 2 && data.clientName.size() <= 120
+        && (!('organization' in data) || (data.organization is string && data.organization.size() <= 140))
+        && data.email is string && data.email.size() >= 3 && data.email.size() <= 180
+        && (!('phone' in data) || (data.phone is string && data.phone.size() <= 40))
+        && data.serviceIds is list && data.serviceIds.size() >= 1 && data.serviceIds.size() <= 10
+        && data.serviceIds[0] is string && data.serviceIds[0].size() <= 64
+        && data.slaTier in ['basic', 'business', 'enterprise']
+        && data.estimatedBaseline is number && data.estimatedBaseline >= 0 && data.estimatedBaseline <= 1000000
+        && data.notes is string && data.notes.size() >= 10 && data.notes.size() <= 2000
+        && data.status in ['submitted', 'reviewed']
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidTicket(data) {
+      return data.keys().hasAll([
+          'id', 'ownerId', 'referenceCode', 'subject', 'category',
+          'priority', 'status', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'ownerId', 'referenceCode', 'subject', 'category',
+          'priority', 'status', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.id)
+        && data.ownerId == request.auth.uid
+        && data.referenceCode is string && data.referenceCode.matches('^ESK-[0-9]{4,8}$')
+        && data.subject is string && data.subject.size() >= 4 && data.subject.size() <= 200
+        && data.category is string && data.category.size() >= 2 && data.category.size() <= 80
+        && data.priority in ['standard', 'priority', 'critical']
+        && data.status in ['Open', 'In Progress', 'Resolved']
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidNote(data) {
+      return data.keys().hasAll([
+          'id', 'ownerId', 'sourceType', 'title', 'content', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'ownerId', 'sourceType', 'title', 'content', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.id)
+        && data.ownerId == request.auth.uid
+        && data.sourceType in ['transcription', 'search', 'chat']
+        && data.title is string && data.title.size() >= 2 && data.title.size() <= 160
+        && data.content is string && data.content.size() >= 1 && data.content.size() <= 8000
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // Connection health check doc (read-only ping)
+    match /test/connection {
+      allow get: if true;
+    }
+
+    // Private User Profiles (PII isolated to owner)
+    match /users/{userId} {
+      allow get: if isSignedIn() && isValidId(userId) && request.auth.uid == userId;
+      allow create: if isSignedIn()
+        && isValidId(userId)
+        && request.auth.uid == userId
+        && isValidUserProfile(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isSignedIn()
+        && isValidId(userId)
+        && request.auth.uid == userId
+        && isValidUserProfile(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().role == existing().role
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'email', 'photoURL', 'updatedAt']);
+      allow delete: if isSignedIn() && isValidId(userId) && request.auth.uid == userId;
+    }
+
+    // Quote Requests
+    match /quotes/{quoteId} {
+      allow get: if isSignedIn() && isValidId(quoteId) && existing().ownerId == request.auth.uid;
+      allow list: if isSignedIn() && existing().ownerId == request.auth.uid;
+      allow create: if isSignedIn()
+        && isValidId(quoteId)
+        && isValidQuote(incoming())
+        && incoming().id == quoteId
+        && incoming().status == 'submitted'
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isSignedIn()
+        && isValidId(quoteId)
+        && existing().ownerId == request.auth.uid
+        && existing().status != 'reviewed'
+        && isValidQuote(incoming())
+        && incoming().id == existing().id
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['notes', 'slaTier', 'serviceIds', 'estimatedBaseline', 'updatedAt']);
+      allow delete: if isSignedIn() && isValidId(quoteId) && existing().ownerId == request.auth.uid;
+    }
+
+    // Support Tickets
+    match /tickets/{ticketId} {
+      allow get: if isSignedIn() && isValidId(ticketId) && existing().ownerId == request.auth.uid;
+      allow list: if isSignedIn() && existing().ownerId == request.auth.uid;
+      allow create: if isSignedIn()
+        && isValidId(ticketId)
+        && isValidTicket(incoming())
+        && incoming().id == ticketId
+        && incoming().status == 'Open'
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isSignedIn()
+        && isValidId(ticketId)
+        && existing().ownerId == request.auth.uid
+        && existing().status != 'Resolved'
+        && isValidTicket(incoming())
+        && incoming().id == existing().id
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['subject', 'priority', 'status', 'updatedAt']);
+      allow delete: if isSignedIn() && isValidId(ticketId) && existing().ownerId == request.auth.uid;
+    }
+
+    // Saved AI Studio Notes & Transcriptions
+    match /notes/{noteId} {
+      allow get: if isSignedIn() && isValidId(noteId) && existing().ownerId == request.auth.uid;
+      allow list: if isSignedIn() && existing().ownerId == request.auth.uid;
+      allow create: if isSignedIn()
+        && isValidId(noteId)
+        && isValidNote(incoming())
+        && incoming().id == noteId
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isSignedIn()
+        && isValidId(noteId)
+        && existing().ownerId == request.auth.uid
+        && isValidNote(incoming())
+        && incoming().id == existing().id
+        && incoming().ownerId == existing().ownerId
+        && incoming().sourceType == existing().sourceType
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['title', 'content', 'updatedAt']);
+      allow delete: if isSignedIn() && isValidId(noteId) && existing().ownerId == request.auth.uid;
+    }
+  }
+}
